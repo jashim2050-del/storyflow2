@@ -1,20 +1,35 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Scene } from "../types";
 
-// Safely access the API Key.
-// In some browser environments, accessing 'process' directly can cause a ReferenceError if not polyfilled.
-const apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : undefined;
+// Lazy initialization of the API client.
+// We do not initialize it at the top level to prevent runtime errors (like 'process is not defined')
+// from crashing the app during module loading.
+let aiClient: GoogleGenAI | null = null;
 
-// Initialize the client
-// We use a fallback empty string to ensure the constructor doesn't throw if key is missing during load.
-// The actual API calls will check for the key's presence.
-const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+const getAiClient = (): GoogleGenAI => {
+  if (aiClient) return aiClient;
+
+  // Safely access the API Key.
+  const apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : undefined;
+  
+  // Initialize the client
+  // We use a fallback empty string if key is missing to allow the object to be created,
+  // but actual calls will fail if the key is invalid.
+  aiClient = new GoogleGenAI({ apiKey: apiKey || "" });
+  return aiClient;
+};
+
+const getApiKey = (): string | undefined => {
+    return (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : undefined;
+}
 
 export const generateStoryDraft = async (topic: string, customDialogue?: string, durationMinutes: number = 1): Promise<string> => {
+  const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("API Key is missing. Please check your environment configuration.");
   }
 
+  const ai = getAiClient();
   const model = "gemini-2.5-flash";
   const targetSceneCount = Math.max(1, Math.round(durationMinutes * 6));
 
@@ -51,10 +66,12 @@ export const generateStoryDraft = async (topic: string, customDialogue?: string,
 };
 
 export const generateScenesFromStory = async (storyText: string, durationMinutes: number, allowVariations: boolean = false): Promise<Scene[]> => {
+  const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("API Key is missing. Please check your environment configuration.");
   }
 
+  const ai = getAiClient();
   const model = "gemini-2.5-flash"; // Using Flash for speed and good structured output capability
   const targetSceneCount = Math.max(1, Math.round(durationMinutes * 6));
 
