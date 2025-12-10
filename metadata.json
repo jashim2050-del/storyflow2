@@ -1,0 +1,5 @@
+{
+  "name": "StoryFlow Builder",
+  "description": "A storyboard generator that splits narratives into 10-second prompt clips optimized for scene builder tools.",
+  "requestFramePermissions": []
+}
