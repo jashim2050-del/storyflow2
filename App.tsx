@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Scene, User, AppState, UserStats } from './types';
 import { generateStoryDraft, generateScenesFromStory } from './services/geminiService';
 import { Button } from './components/Button';
 import { SceneCard } from './components/SceneCard';
+import { jwtDecode } from 'jwt-decode';
 
 // Mock Data for Admin Panel Simulation
 const INITIAL_MOCK_DB: UserStats[] = [
@@ -18,10 +19,61 @@ const MOCK_USER: User = {
   avatar: "https://picsum.photos/100/100?random=4"
 };
 
+// --- Error Handling Helper ---
+const getFriendlyErrorMessage = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn("App Error Details:", message); // Log for debugging
+
+  // Configuration Errors
+  if (message.includes("API Key is missing")) {
+    return "Configuration Error: The API Key is missing. Please check your environment settings.";
+  }
+  
+  // Rate Limits (HTTP 429)
+  if (message.includes("429") || message.toLowerCase().includes("quota") || message.toLowerCase().includes("exhausted")) {
+    return "Usage Limit Exceeded: The AI service is currently busy or you have hit your rate limit. Please wait a minute and try again.";
+  }
+
+  // Authentication/Permission (HTTP 400/403)
+  if (message.includes("400") || message.includes("403") || message.includes("API key not valid")) {
+    return "Authentication Error: The provided API key is invalid or has expired.";
+  }
+
+  // Server Errors (HTTP 500/503)
+  if (message.includes("500") || message.includes("503") || message.toLowerCase().includes("overloaded")) {
+    return "Service Unavailable: Google's AI servers are currently overloaded. Please try again shortly.";
+  }
+
+  // Network Issues
+  if (message.toLowerCase().includes("fetch") || message.toLowerCase().includes("network") || message.toLowerCase().includes("failed to connect")) {
+    return "Connection Error: Unable to reach the AI service. Please check your internet connection.";
+  }
+
+  // Data/Parsing Issues
+  if (message.includes("JSON") || message.includes("SyntaxError") || message.includes("Unexpected token")) {
+    return "Data Processing Error: The AI failed to generate valid structured data. Retrying usually fixes this.";
+  }
+
+  // Safety Filters
+  if (message.toLowerCase().includes("safety") || message.toLowerCase().includes("blocked") || message.includes("candidate")) {
+    return "Content Blocked: The request was flagged by safety filters. Please try modifying your topic or prompt.";
+  }
+
+  // Fallback
+  return `An unexpected error occurred: ${message.slice(0, 150)}${message.length > 150 ? '...' : ''}`;
+};
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>(AppState.LOGIN);
   const [user, setUser] = useState<User | null>(null);
   
+  // Login Configuration State
+  const [googleClientId, setGoogleClientId] = useState<string>(() => {
+    return (typeof process !== 'undefined' && process.env && process.env.GOOGLE_CLIENT_ID) || '';
+  });
+  const [showClientConfig, setShowClientConfig] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
   // App Logic State
   const [topic, setTopic] = useState('');
   const [customDialogue, setCustomDialogue] = useState('');
@@ -36,9 +88,52 @@ export default function App() {
   const [adminError, setAdminError] = useState('');
   const [userDb, setUserDb] = useState<UserStats[]>(INITIAL_MOCK_DB);
 
+  // --- Login Effects ---
+
+  useEffect(() => {
+    // Check if we have a client ID and if the Google script is loaded
+    if (appState === AppState.LOGIN && googleClientId && (window as any).google) {
+      try {
+        (window as any).google.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: handleGoogleCredentialResponse,
+          auto_select: false,
+          cancel_on_tap_outside: true
+        });
+        
+        const btnContainer = document.getElementById("google-btn-container");
+        if (btnContainer) {
+            (window as any).google.accounts.id.renderButton(
+                btnContainer,
+                { theme: "outline", size: "large", width: "100%", text: "continue_with" }
+            );
+        }
+      } catch (e) {
+        console.error("GSI Initialization Error:", e);
+        setLoginError("Failed to initialize Google Sign-In.");
+      }
+    }
+  }, [appState, googleClientId, showClientConfig]);
+
+  const handleGoogleCredentialResponse = (response: any) => {
+    try {
+        const decoded: any = jwtDecode(response.credential);
+        setUser({
+            email: decoded.email,
+            name: decoded.name,
+            avatar: decoded.picture
+        });
+        setAppState(AppState.INPUT);
+        updateUserActivity(decoded.email);
+    } catch (e) {
+        console.error("Token Decode Error:", e);
+        setLoginError("Failed to sign in. Token invalid.");
+    }
+  };
+
   // --- Actions ---
 
-  const handleLogin = () => {
+  const handleDemoLogin = () => {
     // Simulate Google Login Process
     setTimeout(() => {
       setUser(MOCK_USER);
@@ -85,9 +180,10 @@ export default function App() {
       const draft = await generateStoryDraft(topic, customDialogue, safeDuration);
       setStoryDraft(draft);
       setAppState(AppState.STORY_REVIEW);
-    } catch (err: any) {
-      console.error(err);
-      setError("Failed to generate story draft. Please try again.");
+    } catch (err: unknown) {
+      const friendlyMsg = getFriendlyErrorMessage(err);
+      setError(friendlyMsg);
+      // We remain on INPUT state so user can retry immediately
       setAppState(AppState.INPUT);
     }
   };
@@ -111,9 +207,10 @@ export default function App() {
       }
 
       setAppState(AppState.RESULTS);
-    } catch (err: any) {
-        console.error(err);
-        setError("Failed to generate scene clips. Please try again.");
+    } catch (err: unknown) {
+        const friendlyMsg = getFriendlyErrorMessage(err);
+        setError(friendlyMsg);
+        // We remain on STORY_REVIEW state so user can tweak the story or just retry
         setAppState(AppState.STORY_REVIEW);
     }
   };
@@ -186,13 +283,52 @@ export default function App() {
             <p className="text-slate-400">Transform ideas into structured video clips for Google Flow.</p>
           </div>
           
-          <button 
-            onClick={handleLogin}
-            className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold py-3 px-4 rounded-xl flex items-center justify-center transition-all duration-200 group mb-6"
-          >
-            <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-6 h-6 mr-3" alt="Google Logo" />
-            Continue with Gmail
-          </button>
+          <div className="space-y-4 mb-6">
+            {googleClientId ? (
+                <div id="google-btn-container" className="h-12 w-full flex justify-center"></div>
+            ) : (
+                <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 text-center">
+                    <p className="text-sm text-slate-400 mb-3">
+                        To enable real Google Sign-In, you must provide a valid Client ID.
+                    </p>
+                    <button 
+                        onClick={() => setShowClientConfig(true)}
+                        className="text-indigo-400 hover:text-indigo-300 text-sm font-medium underline"
+                    >
+                        Configure Client ID
+                    </button>
+                </div>
+            )}
+
+            {!googleClientId && (
+                <button 
+                    onClick={handleDemoLogin}
+                    className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold py-3 px-4 rounded-xl flex items-center justify-center transition-all duration-200 group"
+                >
+                    <span className="mr-2">⚡</span>
+                    Try Demo Mode
+                </button>
+            )}
+
+            {showClientConfig && !googleClientId && (
+                <div className="mt-4 p-4 bg-slate-700/30 rounded-lg animate-fade-in">
+                    <label className="block text-xs font-semibold text-slate-400 uppercase mb-2">Google Client ID</label>
+                    <input 
+                        type="text" 
+                        placeholder="782...apps.googleusercontent.com"
+                        className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-xs text-white mb-2 focus:ring-1 focus:ring-indigo-500 outline-none"
+                        onChange={(e) => setGoogleClientId(e.target.value)}
+                    />
+                    <p className="text-[10px] text-slate-500">
+                        This ID is stored in memory only. Create one in Google Cloud Console &#62; APIs & Services &#62; Credentials.
+                    </p>
+                </div>
+            )}
+          </div>
+
+          {loginError && (
+              <p className="text-red-400 text-sm text-center mb-4">{loginError}</p>
+          )}
           
           <div className="border-t border-slate-700 pt-6 mt-4">
             <button 
@@ -433,8 +569,9 @@ export default function App() {
             </div>
 
             {error && (
-                <div className="bg-red-900/20 border border-red-500/50 text-red-200 p-4 rounded-lg text-sm">
-                    {error}
+                <div className="bg-red-900/20 border border-red-500/50 text-red-200 p-4 rounded-lg text-sm flex items-start gap-3 text-left animate-fade-in">
+                    <svg className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                    <span>{error}</span>
                 </div>
             )}
           </div>
@@ -498,8 +635,9 @@ export default function App() {
                 </div>
              </div>
              {error && (
-                <div className="bg-red-900/20 border border-red-500/50 text-red-200 p-4 rounded-lg text-sm text-center">
-                    {error}
+                <div className="bg-red-900/20 border border-red-500/50 text-red-200 p-4 rounded-lg text-sm flex items-start gap-3 text-left animate-fade-in">
+                    <svg className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                    <span>{error}</span>
                 </div>
             )}
            </div>
